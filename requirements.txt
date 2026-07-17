@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+langchain
+langgraph
+langchain-groq
+python-multipart
+pdfplumber
+python-docx
+pandas
+pydantic
