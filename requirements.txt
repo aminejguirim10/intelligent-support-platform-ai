@@ -8,3 +8,5 @@ pdfplumber
 python-docx
 pandas
 pydantic
+httpx
+langchain-core
