@@ -102,9 +102,24 @@ def run_support_agent_chat(
 
     tickets, pending, traces = extract_agent_extras(out_messages)
 
+    # Extract tickets message if no tickets found
+    tickets_message = None
+    if not tickets and len(out_messages) > 0:
+        for msg in reversed(out_messages):
+            if hasattr(msg, 'content') and isinstance(msg.content, str):
+                try:
+                    import json
+                    data = json.loads(msg.content)
+                    if data.get("message") and data.get("tickets") == []:
+                        tickets_message = data.get("message")
+                        break
+                except:
+                    pass
+
     return {
         "reply": reply or "Done.",
         "tickets": tickets,
+        "ticketsMessage": tickets_message,
         "pendingConfirmation": pending,
         "toolTraces": traces,
     }

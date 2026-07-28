@@ -98,6 +98,40 @@ class ListOpenTicketsInput(BaseModel):
 
 
 
+class ListClosedTicketsInput(BaseModel):
+
+    limit: int = Field(default=10, ge=1, le=50, description="Maximum number of tickets to return")
+
+
+
+class FilterTicketsInput(BaseModel):
+
+    status: Optional[str] = Field(default=None, description="Filter by status (OPEN, CLOSED, IN_PROGRESS)")
+
+    priority: Optional[str] = Field(default=None, description="Filter by AI priority (HIGH, MEDIUM, LOW)")
+
+    category: Optional[str] = Field(default=None, description="Filter by AI category (TECHNICAL, BILLING, ACCOUNT, COMPLAINT, REQUEST)")
+
+    sentiment: Optional[str] = Field(default=None, description="Filter by sentiment (POSITIVE, NEGATIVE, NEUTRAL, FRUSTRATED)")
+
+    source: Optional[str] = Field(default=None, description="Filter by source (WEB, CHAT, CSV)")
+
+    user_email: Optional[str] = Field(default=None, description="Filter by user email address")
+
+    title_query: Optional[str] = Field(default=None, description="Search text matched against ticket titles")
+
+    limit: int = Field(default=10, ge=1, le=50, description="Maximum number of tickets to return")
+
+
+
+class ListTicketsByUserInput(BaseModel):
+
+    user_email: str = Field(description="The user email to filter tickets by")
+
+    limit: int = Field(default=10, ge=1, le=50, description="Maximum number of tickets to return")
+
+
+
 
 
 class GetTicketInput(BaseModel):
@@ -146,6 +180,24 @@ def build_tools(client: BackendClient, is_admin: bool) -> List[StructuredTool]:
 
         items = [_summarize_ticket(t) for t in page.get("content", [])]
 
+        if not items:
+            return json.dumps({"tickets": [], "total": 0, "message": "No open tickets found"})
+
+        return json.dumps({"tickets": items, "total": page.get("totalElements", len(items))})
+
+
+
+    def list_closed_tickets(limit: int = 10) -> str:
+
+        """List closed tickets for the current user (or all tickets if admin)."""
+
+        page = client.list_tickets(admin=is_admin, status="CLOSED", size=min(limit, 50))
+
+        items = [_summarize_ticket(t) for t in page.get("content", [])]
+
+        if not items:
+            return json.dumps({"tickets": [], "total": 0, "message": "No closed tickets found"})
+
         return json.dumps({"tickets": items, "total": page.get("totalElements", len(items))})
 
 
@@ -159,6 +211,9 @@ def build_tools(client: BackendClient, is_admin: bool) -> List[StructuredTool]:
         ranked = _sort_by_importance(page.get("content", []))[:limit]
 
         items = [_summarize_ticket(t) for t in ranked]
+
+        if not items:
+            return json.dumps({"tickets": [], "total": 0, "message": "No important open tickets found"})
 
         return json.dumps({"tickets": items, "total": page.get("totalElements", len(items))})
 
@@ -182,7 +237,97 @@ def build_tools(client: BackendClient, is_admin: bool) -> List[StructuredTool]:
 
         items = [_summarize_ticket(t) for t in page.get("content", [])]
 
+        if not items:
+            return json.dumps({"tickets": [], "total": 0, "query": title_query, "message": f"No tickets found matching '{title_query}'"})
+
         return json.dumps({"tickets": items, "query": title_query})
+
+
+
+    def filter_tickets(
+        status: Optional[str] = None,
+        priority: Optional[str] = None,
+        category: Optional[str] = None,
+        sentiment: Optional[str] = None,
+        source: Optional[str] = None,
+        user_email: Optional[str] = None,
+        title_query: Optional[str] = None,
+        limit: int = 10
+    ) -> str:
+        """Filter tickets by multiple criteria (status, priority, category, sentiment, source, user email, title). All filters are AND logic - ticket must match all provided criteria."""
+
+        page = client.list_tickets(
+            admin=is_admin,
+            status=status,
+            title=title_query,
+            size=min(limit, 50)
+        )
+
+        items = page.get("content", [])
+
+        # Apply additional filters that backend doesn't support
+        if priority or category or sentiment or source or user_email:
+            filtered = []
+            for ticket in items:
+                analyses = ticket.get("analyses") or []
+                latest = max(analyses, key=lambda a: a.get("createdAt") or "", default=None) if analyses else None
+
+                # Check priority
+                if priority:
+                    p = (latest or {}).get("priority")
+                    p_val = p.value if hasattr(p, "value") else p
+                    if p_val != priority:
+                        continue
+
+                # Check category
+                if category:
+                    c = (latest or {}).get("category")
+                    c_val = c.value if hasattr(c, "value") else c
+                    if c_val != category:
+                        continue
+
+                # Check sentiment
+                if sentiment:
+                    s = (latest or {}).get("sentiment")
+                    if s != sentiment:
+                        continue
+
+                # Check source
+                if source:
+                    s = ticket.get("source")
+                    s_val = s.value if hasattr(s, "value") else s
+                    if s_val != source:
+                        continue
+
+                # Check user email
+                if user_email:
+                    u = ticket.get("userEmail")
+                    if u != user_email:
+                        continue
+
+                filtered.append(ticket)
+
+            items = filtered[:limit]
+
+        if not items:
+            return json.dumps({"tickets": [], "total": 0, "message": "No tickets found matching the specified criteria"})
+
+        return json.dumps({"tickets": [_summarize_ticket(t) for t in items], "total": len(items)})
+
+
+
+    def list_tickets_by_user(user_email: str, limit: int = 10) -> str:
+        """List all tickets for a specific user by email address."""
+
+        page = client.list_tickets(admin=is_admin, size=min(limit, 50))
+        items = page.get("content", [])
+
+        filtered = [t for t in items if t.get("userEmail") == user_email][:limit]
+
+        if not filtered:
+            return json.dumps({"tickets": [], "total": 0, "message": f"No tickets found for user '{user_email}'"})
+
+        return json.dumps({"tickets": [_summarize_ticket(t) for t in filtered], "total": len(filtered)})
 
 
 
@@ -308,6 +453,18 @@ def build_tools(client: BackendClient, is_admin: bool) -> List[StructuredTool]:
 
         StructuredTool.from_function(
 
+            func=list_closed_tickets,
+
+            name="list_closed_tickets",
+
+            description="List closed support tickets.",
+
+            args_schema=ListClosedTicketsInput,
+
+        ),
+
+        StructuredTool.from_function(
+
             func=get_important_open_tickets,
 
             name="get_important_open_tickets",
@@ -339,6 +496,30 @@ def build_tools(client: BackendClient, is_admin: bool) -> List[StructuredTool]:
             description="Search tickets by title.",
 
             args_schema=SearchTicketsInput,
+
+        ),
+
+        StructuredTool.from_function(
+
+            func=filter_tickets,
+
+            name="filter_tickets",
+
+            description="Filter tickets by multiple criteria (status, priority, category, sentiment, source, user email, title). All filters are AND logic - ticket must match all provided criteria.",
+
+            args_schema=FilterTicketsInput,
+
+        ),
+
+        StructuredTool.from_function(
+
+            func=list_tickets_by_user,
+
+            name="list_tickets_by_user",
+
+            description="List all tickets for a specific user by email address.",
+
+            args_schema=ListTicketsByUserInput,
 
         ),
 
@@ -450,11 +631,17 @@ def extract_agent_extras(messages: list) -> tuple[list, Optional[dict], list]:
 
         "list_open_tickets": "Listing open tickets",
 
+        "list_closed_tickets": "Listing closed tickets",
+
         "get_important_open_tickets": "Ranking important tickets",
 
         "get_ticket_details": "Fetching ticket details",
 
         "search_tickets": "Searching tickets",
+
+        "filter_tickets": "Filtering tickets",
+
+        "list_tickets_by_user": "Listing tickets by user",
 
         "create_support_ticket": "Creating ticket",
 
