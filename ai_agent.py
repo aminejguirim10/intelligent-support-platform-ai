@@ -1,14 +1,11 @@
 import os
+import re
 
 from dotenv import load_dotenv
 
 load_dotenv()
 
-import asyncio
-
-from functools import lru_cache
-
-from typing import TypedDict, List, Optional
+from typing import List
 
 from pydantic import BaseModel, Field
 
@@ -16,53 +13,7 @@ from langchain_groq import ChatGroq
 
 from langchain_core.prompts import ChatPromptTemplate
 
-from langgraph.graph import StateGraph, END
-
 from models import AnalysisResponse, TicketPriority, TicketCategory
-
-
-
-# Internal Pydantic models for structured agent outputs
-
-class PreprocessorResult(BaseModel):
-
-    summary: str = Field(description="A concise summary of the support ticket, highlighting the main issue.")
-
-    detected_language: str = Field(description="The primary language of the ticket (e.g. English, French, Spanish).")
-
-
-
-class ClassificationResult(BaseModel):
-
-    category: TicketCategory = Field(description="The matching category for the ticket.")
-
-    priority: TicketPriority = Field(description="The calculated priority level based on impact and urgency.")
-
-
-
-class SentimentResult(BaseModel):
-
-    sentiment: str = Field(description="The customer sentiment (e.g. Frustrated, Neutral, Happy, Angry, Positive - max 50 chars).")
-
-    keywords: str = Field(description="Comma-separated key phrases or keywords related to the issue (max 1000 chars).")
-
-
-
-class ValidationResult(BaseModel):
-
-    is_valid: bool = Field(description="True if the classification and details are logical, consistent and match backend constraints.")
-
-    feedback: Optional[str] = Field(description="If invalid, detailed guidance on why the classification is incorrect and how to fix it.")
-
-    confidence_score: float = Field(description="Confidence score between 0.0 and 1.0 reflecting how clear the ticket issue is.")
-
-
-
-class TicketSplits(BaseModel):
-
-    is_multiple: bool = Field(description="True if the text contains multiple separate customer support tickets or messages.")
-
-    tickets: List[str] = Field(description="A list of individual ticket texts extracted from the input. If it is only a single ticket, return a list with just the single ticket text.")
 
 
 
@@ -72,347 +23,200 @@ _LLM = ChatGroq(model="llama-3.3-70b-versatile", temperature=0.0)
 
 
 
-# Pre-built chains — Constructed ONCE at module load, fully stateless & reusable
+# Single unified analysis model
 
-_PREPROCESS_CHAIN = (
+class UnifiedAnalysisResult(BaseModel):
 
-    ChatPromptTemplate.from_messages([
+    category: TicketCategory = Field(description="The matching category for the ticket (TECHNICAL, BILLING, ACCOUNT, COMPLAINT, REQUEST)")
 
-        ("system", "You are the Preprocessor Agent. Your task is to analyze the raw support ticket. "
+    priority: TicketPriority = Field(description="The calculated priority level (HIGH, MEDIUM, LOW)")
 
-                   "Provide a concise summary highlighting the customer's core problem, and detect the language."),
+    sentiment: str = Field(description="The customer sentiment (max 50 chars, e.g. Frustrated, Neutral, Happy, Angry, Positive)")
 
-        ("human", "Ticket content:\n\n{ticket_text}")
+    keywords: str = Field(description="Comma-separated key phrases or keywords related to the issue (max 1000 chars)")
 
-    ])
+    confidence_score: float = Field(description="Confidence score between 0.0 and 1.0 reflecting how clear the ticket issue is")
 
-    | _LLM.with_structured_output(PreprocessorResult)
+    summary: str = Field(description="A concise summary of the support ticket, highlighting the main issue")
 
-)
-
-
-
-_SENTIMENT_CHAIN = (
-
-    ChatPromptTemplate.from_messages([
-
-        ("system", "You are the Sentiment & Keywords Agent. Analyze the support ticket and extract:\n"
-
-                   "1. Sentiment: The customer's emotional tone (e.g. Frustrated, Happy, Calm, Upset, Neutral, Positive, Negative - max 50 chars).\n"
-
-                   "2. Keywords: Comma-separated list of keywords representing the core technical components, products, or subjects discussed (max 1000 chars)."),
-
-        ("human", "Ticket content:\n\n{ticket_text}")
-
-    ])
-
-    | _LLM.with_structured_output(SentimentResult)
-
-)
+    detected_language: str = Field(description="The primary language of the ticket (e.g. English, French, Spanish)")
 
 
 
-_CLASSIFY_PROMPT = ChatPromptTemplate.from_messages([
+# Single unified prompt that extracts all information in one LLM call
 
-    ("system", "You are the Classifier Agent. Your task is to classify the support ticket into a Category and Priority.\n"
+_ANALYSIS_PROMPT = ChatPromptTemplate.from_messages([
 
-               "Categories:\n"
+    ("system", """You are an expert support ticket analyst. Analyze the support ticket and extract ALL of the following information in a single response:
 
-               "- TECHNICAL: Technical bugs, application crashes, server errors, API issues, integration problems.\n"
+CATEGORIES:
+- TECHNICAL: Technical bugs, application crashes, server errors, API issues, integration problems
+- BILLING: Invoice issues, payment failures, refunds, price plans, subscription renewals
+- ACCOUNT: Login issues, registration, password resets, account deletion, permission changes
+- COMPLAINT: Customer expressing anger, poor service, dissatisfaction with policy
+- REQUEST: Feature requests, asking for documentation, general questions, feedback
 
-               "- BILLING: Invoice issues, payment failures, refunds, price plans, subscription renewals.\n"
+PRIORITIES:
+- HIGH: Critical system outages, payment blockages, loss of core functionality
+- MEDIUM: Important issues with manual workarounds, minor billing issues, account access delays
+- LOW: Non-blocking queries, feature requests, minor styling bugs
 
-               "- ACCOUNT: Login issues, registration, password resets, account deletion, permission changes.\n"
+SENTIMENT: The customer's emotional tone (max 50 chars)
+KEYWORDS: Comma-separated list of keywords (max 1000 chars)
+CONFIDENCE SCORE: 0.0 to 1.0 based on clarity of the issue
+SUMMARY: Concise summary highlighting the main issue
+LANGUAGE: Primary language of the ticket
 
-               "- COMPLAINT: Customer expressing anger, poor service, dissatisfaction with policy.\n"
+Ensure consistency: billing/invoice tickets should be BILLING (not TECHNICAL), login issues should be ACCOUNT, critical downtime should be HIGH priority."""),
 
-               "- REQUEST: Feature requests, asking for documentation, general questions, feedback.\n\n"
-
-               "Priorities:\n"
-
-               "- HIGH: Critical system outages, payment blockages, loss of core functionality.\n"
-
-               "- MEDIUM: Important issues with manual workarounds, minor billing issues, account access delays.\n"
-
-               "- LOW: Non-blocking queries, feature requests, minor styling bugs.\n"
-
-               "{feedback_context}"),
-
-    ("human", "Ticket Summary: {summary}\nOriginal Ticket:\n{ticket_text}")
+    ("human", "Ticket content:\n\n{ticket_text}")
 
 ])
 
-_CLASSIFY_CHAIN = _CLASSIFY_PROMPT | _LLM.with_structured_output(ClassificationResult)
 
 
+# Single unified chain - ONE LLM call per ticket
 
-_VALIDATE_CHAIN = (
+_ANALYSIS_CHAIN = _ANALYSIS_PROMPT | _LLM.with_structured_output(UnifiedAnalysisResult)
 
-    ChatPromptTemplate.from_messages([
 
-        ("system", "You are the Validator & Supervisor Agent. Inspect the classification results for logical consistency.\n"
 
-                   "Ensure that a billing or invoice ticket is classified as BILLING (not TECHNICAL).\n"
+# Ticket splitter for handling multiple tickets in one text
 
-                   "Ensure that user login issues are classified as ACCOUNT.\n"
+class TicketSplits(BaseModel):
 
-                   "Ensure that critical downtime is flagged as HIGH priority.\n"
+    is_multiple: bool = Field(description="True if the text contains multiple separate customer support tickets or messages.")
 
-                   "Evaluate and provide a realistic confidence score (0.0 to 1.0) for the analysis based on clarity."),
+    tickets: List[str] = Field(description="A list of individual ticket texts extracted from the input. If it is only a single ticket, return a list with just the single ticket text.")
 
-        ("human", "Original Ticket: {ticket_text}\n"
 
-                  "Proposed Category: {category}\n"
 
-                  "Proposed Priority: {priority}\n"
+_SPLITTER_PROMPT = ChatPromptTemplate.from_messages([
 
-                  "Proposed Sentiment: {sentiment}")
+    ("system", "You are the Ticket Splitter Agent. Examine the provided text. "
 
-    ])
+               "Determine if it contains a single customer support ticket or multiple separate customer support tickets/requests/messages. "
 
-    | _LLM.with_structured_output(ValidationResult)
+               "Split the input into individual ticket texts, keeping each message intact. "
 
-)
+               "If the text only contains a single ticket or a single logical issue, return is_multiple=False and list the entire text in the tickets array."),
 
+    ("human", "Input text:\n\n{text}")
 
+])
 
-_SPLITTER_CHAIN = (
 
-    ChatPromptTemplate.from_messages([
 
-        ("system", "You are the Ticket Splitter Agent. Examine the provided text. "
+_SPLITTER_CHAIN = _SPLITTER_PROMPT | _LLM.with_structured_output(TicketSplits)
 
-                   "Determine if it contains a single customer support ticket or multiple separate customer support tickets/requests/messages. "
 
-                   "Split the input into individual ticket texts, keeping each message intact. "
 
-                   "If the text only contains a single ticket or a single logical issue, return is_multiple=False and list the entire text in the tickets array."),
+# Chunking config for the ticket splitter
 
-        ("human", "Input text:\n\n{text}")
+_CHUNK_SIZE = 6000       # characters per chunk sent to the splitter LLM
 
-    ])
+_CHUNK_OVERLAP = 500     # overlap between chunks so tickets at boundaries aren't lost
 
-    | _LLM.with_structured_output(TicketSplits)
 
-)
 
+def _deduplicate_tickets(tickets: List[str]) -> List[str]:
 
+    """Remove near-duplicate tickets that appear in overlapping chunks."""
 
-# State definition
+    seen: List[str] = []
 
-class AgentState(TypedDict):
+    for ticket in tickets:
 
-    ticket_text: str
+        normalized = ticket.strip()
 
-    summary: Optional[str]
+        if not normalized:
 
-    detected_language: Optional[str]
+            continue
 
-    category: Optional[TicketCategory]
+        # Check if this ticket is a substantial substring of one already seen
 
-    priority: Optional[TicketPriority]
+        is_dup = False
 
-    sentiment: Optional[str]
+        for existing in seen:
 
-    keywords: Optional[str]
+            # If >80% of the shorter string appears in the longer, it's a duplicate
 
-    confidence_score: Optional[float]
+            shorter, longer = (normalized, existing) if len(normalized) <= len(existing) else (existing, normalized)
 
-    attempts: int
+            if shorter in longer:
 
-    validation_errors: Optional[str]
+                is_dup = True
 
-    final_result: Optional[AnalysisResponse]
+                break
 
+        if not is_dup:
 
+            seen.append(normalized)
 
-# Node 1: Preprocessor Agent
+    return seen
 
-def preprocessor_agent(state: AgentState) -> dict:
 
-    result = _PREPROCESS_CHAIN.invoke({"ticket_text": state["ticket_text"]})
+def _calculate_confidence_score(ticket_text: str) -> float:
+    """
+    Calculate confidence from the ticket content itself.
 
-    return {
+    The LLM still handles categorization and priority, but confidence is derived
+    from the amount of detail, specificity, and structure in the ticket so it
+    varies per message instead of defaulting to a constant value.
+    """
+    text = ticket_text.strip()
+    if not text:
+        return 0.0
 
-        "summary": result.summary,
+    score = 0.45
+    lowered = text.lower()
 
-        "detected_language": result.detected_language
+    if len(text) > 700:
+        score += 0.22
+    elif len(text) > 350:
+        score += 0.16
+    elif len(text) > 150:
+        score += 0.09
+    elif len(text) < 30:
+        score -= 0.22
+    elif len(text) < 80:
+        score -= 0.08
+
+    detail_markers = [
+        "error", "exception", "failed", "timeout", "crash", "bug",
+        "invoice", "payment", "refund", "login", "password", "api",
+        "database", "server", "deployment", "account", "subscription",
+    ]
+    if any(marker in lowered for marker in detail_markers):
+        score += 0.10
+
+    if re.search(r"\b\d{2,}\b", text):
+        score += 0.05
+    if re.search(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", text):
+        score += 0.05
+
+    sentence_count = len([part for part in re.split(r"[.!?]+", text) if part.strip()])
+    if sentence_count >= 4:
+        score += 0.10
+    elif sentence_count >= 2:
+        score += 0.05
+
+    vague_markers = ["something", "maybe", "not sure", "probably", "might be", "idk"]
+    if any(marker in lowered for marker in vague_markers):
+        score -= 0.12
+
+    word_count = len(text.split())
+    if word_count < 5:
+        score -= 0.18
+    elif word_count < 10:
+        score -= 0.08
+
+    if len(text) > 0 and " " not in text and len(set(text)) < 6:
+        score = 0.1
+
+    return max(0.0, min(1.0, round(score, 2)))
 
-    }
 
-
-
-# Node 2: Classifier Agent — Accepts dynamic feedback
-
-def classifier_agent(state: AgentState) -> dict:
-
-    feedback_context = ""
-
-    if state.get("validation_errors"):
-
-        feedback_context = (
-
-            f"\n[PREVIOUS CLASSIFICATION FAILURE - CORRECTION REQUIRED]\n"
-
-            f"The previous classification was rejected with the following feedback:\n"
-
-            f"{state['validation_errors']}\n"
-
-        )
-
-
-
-    result = _CLASSIFY_CHAIN.invoke({
-
-        "summary": state["summary"],
-
-        "ticket_text": state["ticket_text"],
-
-        "feedback_context": feedback_context
-
-    })
-
-
-
-    return {
-
-        "category": result.category,
-
-        "priority": result.priority,
-
-        "attempts": state.get("attempts", 0) + 1
-
-    }
-
-
-
-# Node 3: Sentiment & Keywords Analyst Agent
-
-def sentiment_agent(state: AgentState) -> dict:
-
-    result = _SENTIMENT_CHAIN.invoke({"ticket_text": state["ticket_text"]})
-
-    return {
-
-        "sentiment": result.sentiment,
-
-        "keywords": result.keywords
-
-    }
-
-
-
-# Node 4: Validator & Supervisor Agent
-
-def validator_agent(state: AgentState) -> dict:
-
-    result = _VALIDATE_CHAIN.invoke({
-
-        "ticket_text": state["ticket_text"],
-
-        "category": state["category"].value if state["category"] else "None",
-
-        "priority": state["priority"].value if state["priority"] else "None",
-
-        "sentiment": state["sentiment"]
-
-    })
-
-
-
-    if not result.is_valid and state["attempts"] < 3:
-
-        return {
-
-            "validation_errors": result.feedback,
-
-            "confidence_score": result.confidence_score
-
-        }
-
-    else:
-
-        final_response = AnalysisResponse(
-
-            category=state["category"],
-
-            priority=state["priority"],
-
-            sentiment=state["sentiment"],
-
-            keywords=state["keywords"],
-
-            confidenceScore=result.confidence_score
-
-        )
-
-        return {
-
-            "validation_errors": None,
-
-            "confidence_score": result.confidence_score,
-
-            "final_result": final_response
-
-        }
-
-
-
-# Conditional Router
-
-def should_continue(state: AgentState):
-
-    if state.get("validation_errors") and state.get("attempts", 0) < 3:
-
-        return "classify"
-
-    return END
-
-
-
-# Build & Compile LangGraph
-
-workflow = StateGraph(AgentState)
-
-workflow.add_node("preprocess", preprocessor_agent)
-
-workflow.add_node("classify", classifier_agent)
-
-workflow.add_node("sentiment", sentiment_agent)
-
-workflow.add_node("validate", validator_agent)
-
-
-
-workflow.set_entry_point("preprocess")
-
-workflow.add_edge("preprocess", "classify")
-
-workflow.add_edge("preprocess", "sentiment")
-
-workflow.add_edge("classify", "validate")
-
-workflow.add_edge("sentiment", "validate")
-
-workflow.add_conditional_edges(
-
-    "validate",
-
-    should_continue,
-
-    {"classify": "classify", END: END}
-
-)
-
-
-
-# Compiled once — reused for every analysis request
-
-app_graph = workflow.compile()
-
-
-
-# Public API
 
 def split_tickets(text: str) -> List[str]:
 
@@ -420,11 +224,69 @@ def split_tickets(text: str) -> List[str]:
 
     Examines the text with a pre-built chain and splits into a list of tickets.
 
+    For very large texts (>8000 chars), splits the input into overlapping chunks
+
+    and processes each independently to avoid LLM context window issues.
+
+    Results are deduplicated to handle the overlap regions.
+
     """
 
-    result = _SPLITTER_CHAIN.invoke({"text": text})
+    text = text.strip()
 
-    return result.tickets
+    if not text:
+
+        return []
+
+    # Small enough to process in one shot
+
+    if len(text) <= 8000:
+
+        result = _SPLITTER_CHAIN.invoke({"text": text})
+
+        return [t.strip() for t in result.tickets if t.strip()]
+
+    # Large text — process in chunks
+
+    all_tickets: List[str] = []
+
+    start = 0
+
+    while start < len(text):
+
+        end = min(start + _CHUNK_SIZE, len(text))
+
+        # Try to break at a natural boundary (newline) near the end of the chunk
+
+        if end < len(text):
+
+            newline_pos = text.rfind("\n", start + _CHUNK_SIZE - 200, end)
+
+            if newline_pos > start:
+
+                end = newline_pos + 1
+
+        chunk = text[start:end]
+
+        try:
+
+            result = _SPLITTER_CHAIN.invoke({"text": chunk})
+
+            chunk_tickets = [t.strip() for t in result.tickets if t.strip()]
+
+            all_tickets.extend(chunk_tickets)
+
+        except Exception:
+
+            # If the splitter fails on a chunk, treat the whole chunk as one ticket
+
+            all_tickets.append(chunk.strip())
+
+        # Advance with overlap
+
+        start = end - _CHUNK_OVERLAP if end < len(text) else end
+
+    return _deduplicate_tickets(all_tickets)
 
 
 
@@ -432,39 +294,28 @@ def run_analysis(ticket_text: str) -> AnalysisResponse:
 
     """
 
-    Runs the full multi-agent analysis pipeline on a single ticket.
+    Runs the unified analysis pipeline on a single ticket.
 
-    The graph is pre-compiled and chains are pre-built — no cold-start on each call.
+    This makes ONLY ONE LLM call per ticket, extracting all information at once.
 
     """
 
-    initial_state = {
+    result = _ANALYSIS_CHAIN.invoke({"ticket_text": ticket_text})
 
-        "ticket_text": ticket_text,
+    calculated_confidence = _calculate_confidence_score(ticket_text)
 
-        "summary": None,
 
-        "detected_language": None,
 
-        "category": None,
+    return AnalysisResponse(
 
-        "priority": None,
+        category=result.category,
 
-        "sentiment": None,
+        priority=result.priority,
 
-        "keywords": None,
+        sentiment=result.sentiment,
 
-        "confidence_score": None,
+        keywords=result.keywords,
 
-        "attempts": 0,
+        confidenceScore=calculated_confidence
 
-        "validation_errors": None,
-
-        "final_result": None
-
-    }
-
-    result_state = app_graph.invoke(initial_state)
-
-    return result_state["final_result"]
-
+    )
