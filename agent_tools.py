@@ -374,33 +374,34 @@ def build_tools(client: BackendClient, is_admin: bool) -> List[StructuredTool]:
 
 
     def close_ticket(ticket_id: int) -> str:
-
         """Request to close a ticket (sets status to CLOSED). Requires user confirmation in the chat UI."""
 
         try:
-
             ticket = client.get_ticket(ticket_id)
-
+            
+            # Check if ticket is already closed
+            status = ticket.get("status")
+            if hasattr(status, "value"):
+                status = status.value
+            
+            if status == "CLOSED":
+                return json.dumps({
+                    "error": "Ticket is already closed",
+                    "ticket_id": ticket_id,
+                    "ticket_title": ticket.get("title"),
+                    "current_status": status
+                })
         except Exception as e:
-
             return json.dumps({"error": str(e)})
 
         return json.dumps(
-
             {
-
                 "requires_confirmation": True,
-
                 "action": "close_ticket",
-
                 "ticket_id": ticket_id,
-
                 "ticket_title": ticket.get("title"),
-
                 "message": f"Close ticket #{ticket_id} « {ticket.get('title')} »?",
-
             }
-
         )
 
 
@@ -566,47 +567,40 @@ def build_tools(client: BackendClient, is_admin: bool) -> List[StructuredTool]:
 
 
 def execute_confirmed_action(client: BackendClient, action: str, ticket_id: int) -> dict:
-
     if action == "close_ticket":
-
         ticket = client.get_ticket(ticket_id)
-
+        
+        # Check if ticket is already closed
         status = ticket.get("status")
-
         if hasattr(status, "value"):
-
             status = status.value
-
+        
+        if status == "CLOSED":
+            return {"success": False, "action": action, "error": "Ticket is already closed", "ticket": _summarize_ticket(ticket)}
+        
         source = ticket.get("source")
-
         if hasattr(source, "value"):
-
             source = source.value
 
         updated = client.update_ticket(
-
             ticket_id,
-
             {
-
                 "title": ticket["title"],
-
                 "description": ticket["description"],
-
                 "source": source,
-
                 "status": "CLOSED",
-
             },
-
         )
-
         return {"success": True, "action": action, "ticket": _summarize_ticket(updated)}
 
     if action == "delete_ticket":
-
+        # Check if ticket exists before deleting
+        try:
+            ticket = client.get_ticket(ticket_id)
+        except Exception:
+            return {"success": False, "action": action, "error": "Ticket not found"}
+        
         client.delete_ticket(ticket_id)
-
         return {"success": True, "action": action, "ticket_id": ticket_id}
 
     raise ValueError(f"Unknown action: {action}")

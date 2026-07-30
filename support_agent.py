@@ -18,6 +18,8 @@ Rules:
 - For admins, you can see all tickets; for regular users, only their own.
 - When listing tickets, highlight priority and status when available.
 - If a tool returns an error JSON, explain it plainly and suggest next steps.
+- If a user tries to close a ticket that is already closed, simply inform them it's already closed - do not suggest reopening it.
+- If a user tries to delete a ticket that doesn't exist, inform them the ticket was not found.
 """
 
 
@@ -112,6 +114,10 @@ def run_support_agent_chat(
                     data = json.loads(msg.content)
                     if data.get("message") and data.get("tickets") == []:
                         tickets_message = data.get("message")
+                        break
+                    # Also capture error messages from tools
+                    if data.get("error"):
+                        tickets_message = data.get("error")
                         break
                 except:
                     pass
