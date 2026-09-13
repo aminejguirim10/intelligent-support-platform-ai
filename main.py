@@ -102,6 +102,12 @@ def _sse_event(data: dict, event: str = "message") -> str:
 # Endpoints
 # ---------------------------------------------------------------------------
 
+@app.get("/health")
+async def health_check():
+    """Health check endpoint for container orchestration and monitoring."""
+    return {"status": "healthy", "service": "ticket-ai-analysis"}
+
+
 @app.post("/analyze-ticket", response_model=List[AnalyzedTicket])
 async def analyze_ticket_file(file: UploadFile = File(...)):
     """

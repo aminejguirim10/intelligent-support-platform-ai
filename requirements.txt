@@ -10,3 +10,4 @@ pandas
 pydantic
 httpx
 langchain-core
+python-dotenv
