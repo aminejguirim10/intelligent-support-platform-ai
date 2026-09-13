@@ -19,7 +19,7 @@ from models import AnalysisResponse, TicketPriority, TicketCategory
 
 # LLM Singleton — Created ONCE at module import, reused across all requests
 
-_LLM = ChatGroq(model="llama-3.3-70b-versatile", temperature=0.0)
+_LLM = ChatGroq(model="openai/gpt-oss-120b", temperature=0.0)
 
 
 

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import os
 from concurrent.futures import ThreadPoolExecutor
 from typing import List
 
@@ -24,9 +25,10 @@ logger = logging.getLogger("ticket-ai")
 app = FastAPI(title="Ticket AI Analysis Service")
 
 # Configure CORS
+cors_origins = os.getenv("CORS_ALLOWED_ORIGINS", "http://localhost:4200").split(",")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:4200"],
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

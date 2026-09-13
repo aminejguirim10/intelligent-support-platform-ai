@@ -88,7 +88,7 @@ def run_support_agent_chat(
             "toolTraces": [],
         }
 
-    llm = ChatGroq(model="llama-3.3-70b-versatile", temperature=0.2)
+    llm = ChatGroq(model="openai/gpt-oss-120b", temperature=0.2)
     tools = build_tools(client, is_admin)
     agent = create_react_agent(llm, tools)
 
