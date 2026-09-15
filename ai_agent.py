@@ -41,6 +41,8 @@ class UnifiedAnalysisResult(BaseModel):
 
     detected_language: str = Field(description="The primary language of the ticket (e.g. English, French, Spanish)")
 
+    advice: str = Field(description="Helpful advice in English on how to resolve the ticket or guide the user (max 500 characters)")
+
 
 
 # Single unified prompt that extracts all information in one LLM call
@@ -66,6 +68,7 @@ KEYWORDS: Comma-separated list of keywords (max 1000 chars)
 CONFIDENCE SCORE: 0.0 to 1.0 based on clarity of the issue
 SUMMARY: Concise summary highlighting the main issue
 LANGUAGE: Primary language of the ticket
+ADVICE: Helpful advice in English on how to resolve the ticket or guide the user (max 500 characters). This must ALWAYS be in English regardless of the ticket's language.
 
 Ensure consistency: billing/invoice tickets should be BILLING (not TECHNICAL), login issues should be ACCOUNT, critical downtime should be HIGH priority."""),
 
@@ -156,62 +159,101 @@ def _deduplicate_tickets(tickets: List[str]) -> List[str]:
     return seen
 
 
+
 def _calculate_confidence_score(ticket_text: str) -> float:
+
     """
+
     Calculate confidence from the ticket content itself.
 
     The LLM still handles categorization and priority, but confidence is derived
+
     from the amount of detail, specificity, and structure in the ticket so it
+
     varies per message instead of defaulting to a constant value.
+
     """
+
     text = ticket_text.strip()
+
     if not text:
+
         return 0.0
 
     score = 0.45
+
     lowered = text.lower()
 
     if len(text) > 700:
+
         score += 0.22
+
     elif len(text) > 350:
+
         score += 0.16
+
     elif len(text) > 150:
+
         score += 0.09
+
     elif len(text) < 30:
+
         score -= 0.22
+
     elif len(text) < 80:
+
         score -= 0.08
 
     detail_markers = [
+
         "error", "exception", "failed", "timeout", "crash", "bug",
+
         "invoice", "payment", "refund", "login", "password", "api",
+
         "database", "server", "deployment", "account", "subscription",
+
     ]
+
     if any(marker in lowered for marker in detail_markers):
+
         score += 0.10
 
     if re.search(r"\b\d{2,}\b", text):
+
         score += 0.05
+
     if re.search(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", text):
+
         score += 0.05
 
     sentence_count = len([part for part in re.split(r"[.!?]+", text) if part.strip()])
+
     if sentence_count >= 4:
+
         score += 0.10
+
     elif sentence_count >= 2:
+
         score += 0.05
 
     vague_markers = ["something", "maybe", "not sure", "probably", "might be", "idk"]
+
     if any(marker in lowered for marker in vague_markers):
+
         score -= 0.12
 
     word_count = len(text.split())
+
     if word_count < 5:
+
         score -= 0.18
+
     elif word_count < 10:
+
         score -= 0.08
 
     if len(text) > 0 and " " not in text and len(set(text)) < 6:
+
         score = 0.1
 
     return max(0.0, min(1.0, round(score, 2)))
@@ -316,6 +358,8 @@ def run_analysis(ticket_text: str) -> AnalysisResponse:
 
         keywords=result.keywords,
 
-        confidenceScore=calculated_confidence
+        confidenceScore=calculated_confidence,
+
+        advice=result.advice
 
     )

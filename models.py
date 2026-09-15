@@ -19,6 +19,7 @@ class AnalysisResponse(BaseModel):
     sentiment: str = Field(description="The sentiment of the ticket (max 50 characters, e.g., 'Positive', 'Negative', 'Neutral', 'Frustrated')")
     keywords: str = Field(description="Comma-separated keywords extracted from the ticket (max 1000 characters)")
     confidenceScore: float = Field(description="The confidence score of the analysis between 0.0 and 1.0")
+    advice: str = Field(description="Helpful advice in English on how to resolve the ticket (max 500 characters)")
 
 class AnalyzedTicket(BaseModel):
     text: str = Field(description="The original ticket text")

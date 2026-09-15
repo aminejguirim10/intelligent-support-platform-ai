@@ -81,6 +81,7 @@ async def _analyze_tickets_batched(tickets: List[str]) -> List[AnalysisResponse]
                     sentiment="Neutral",
                     keywords="analysis-failed",
                     confidenceScore=0.0,
+                    advice="Analysis failed. Please try again with more specific information.",
                 ))
             else:
                 results.append(result)
@@ -236,6 +237,7 @@ async def analyze_and_create_tickets(
                                 "sentiment": analysis_result.sentiment,
                                 "keywords": analysis_result.keywords,
                                 "confidenceScore": analysis_result.confidenceScore,
+                                "advice": analysis_result.advice,
                             },
                         }
 
