@@ -344,12 +344,6 @@ The container includes:
 4. Update documentation as needed
 5. Open a pull request with a clear description
 
-## 👥 Collaborators
-
-- Mohamed Amine Jguirim
-- Fares Tekaya
-- Firas Hizem
-
 ## 📄 License
 
 This project is part of the Intelligent Support Platform internship project.
